@@ -2,23 +2,107 @@ package org.zoy.oct
 
 import akka.actor.Actor
 import akka.actor.Props
+import scala.concurrent.Future
+import akka.pattern.CircuitBreaker
+
 import com.typesafe.scalalogging.LazyLogging
 import twitter4j._
 import scala.collection.JavaConverters._
+import scala.concurrent.duration._
 import com.mongodb.util.JSON
 import com.mongodb.casbah.Imports._
+
 import twitter4j.json.DataObjectFactory
+import twitter4j.{Status, QueryResult}
+import com.github.nscala_time.time.Imports.DateTime
+
+
+object TwittProcessor {
+
+  case class FollowAndRT(userId: Long, statusId: Long)
+  case class SearchFor(query: String)
+
+  val following = RemoteServices.mongoConn("ouiouistiti")("following")
+  val RTed = RemoteServices.mongoConn("ouiouistiti")("retweeted")
+}
+
+
+import com.mongodb.casbah.commons.conversions.scala.RegisterJodaTimeConversionHelpers
+class TwittProcessor extends Actor with LazyLogging {
+  RegisterJodaTimeConversionHelpers.register()
+  import context.dispatcher
+
+  val breaker =
+    new CircuitBreaker(context.system.scheduler,
+      maxFailures = 2,
+      callTimeout = 10.seconds,
+      resetTimeout = 5.minute).onOpen(notifyMeOnOpen())
+
+  def notifyMeOnOpen(): Unit =
+    logger.warn("Twitter has reach Circuit Breaker threshold.")
+
+  def performSearch(currentSearch: String) = {
+    logger.info(s"Searching for $currentSearch")
+    val query = new Query(currentSearch)
+    query.setResultType(Query.ResultType.recent)
+    val result = RemoteServices.twitter.search(query)
+
+    HarvesterActor.StoreResult(currentSearch, result)
+  }
+
+  def receive = {
+    case TwittProcessor.SearchFor(search: String) => {
+      val harvester = context.actorOf(Props[HarvesterActor], "resultStore")
+      harvester ! breaker.withSyncCircuitBreaker(performSearch(search))
+    }
+    case TwittProcessor.FollowAndRT(userId, statusId) => {
+      val user = TwittProcessor.following.findOne(MongoDBObject("_id" -> userId))
+      user match {
+        case Some(u) => logger.info(s"Already following $userId")
+        case None => breaker.withSyncCircuitBreaker(followUser(userId))
+      }
+      breaker.withCircuitBreaker(Future(retweet(statusId)))
+    }
+  }
+  def followUser(userId: Long) = {
+    logger.info(s"Following $userId")
+    RemoteServices.twitter.friendsFollowers.createFriendship(userId)
+    val obj = MongoDBObject("_id" -> userId, "followDate" -> DateTime.now)
+    TwittProcessor.following += obj
+  }
+  def retweet(statusId: Long) = {
+    if (TwittProcessor.RTed.find(MongoDBObject("_id" -> statusId)).count == 1) {
+        logger.info(s"Already Retweeted $statusId")
+      } else {
+        logger.info(s"RTing $statusId")
+        RemoteServices.twitter.tweets.retweetStatus(statusId)
+        val obj = MongoDBObject("_id" -> statusId, "rtDate" -> DateTime.now)
+        TwittProcessor.RTed += obj
+
+    }
+  }
+}
 
 object HarvesterActor {
   case object Harvest
   case object WorkComplete
+  case class StoreResult(currentSearch: String, results: QueryResult)
 }
+
 
 class HarvesterActor extends Actor with LazyLogging {
   def receive = {
     case HarvesterActor.Harvest => {
       harvest
-      sender() ! HarvesterActor.WorkComplete
+    }
+    case HarvesterActor.StoreResult(search, results) => {
+      logger.info(s"Storing results for $search")
+      results.getTweets.asScala.map{ tweet =>
+        saveOrIgnore(search, firstTweet(tweet))
+      }
+
+      val requeuer = context.actorOf(Props[RequeueActor])
+      requeuer ! RequeueActor.Requeue
     }
   }
 
@@ -74,18 +158,8 @@ class HarvesterActor extends Actor with LazyLogging {
 
   def harvest = {
     RemoteServices.searches.foreach{ currentSearch =>
-      logger.info(s"Searching for $currentSearch")
-      val query = new Query(currentSearch)
-      query.setResultType(Query.ResultType.recent)
-      val result = RemoteServices.twitter.search(query)
-
-      val tweets = result.getTweets.asScala
-      tweets.map{ tweet =>
-        saveOrIgnore(currentSearch, firstTweet(tweet))
-      }
+      val tw = context.actorOf(Props[TwittProcessor])
+      tw ! TwittProcessor.SearchFor(currentSearch)
     }
-
-    val requeuer = context.actorOf(Props[RequeueActor])
-    requeuer ! RequeueActor.Requeue
   }
 }
