@@ -12,8 +12,10 @@ object RemoteServices {
 
   val mongoConn = MongoConnection()
   val mongoDB = mongoConn("ouiouistiti")
+
   var users = mongoDB("users")
-  val mongoColl = mongoConn("ouiouistiti")("tweets")
+  val mongoColl = mongoDB("tweets")
+
   val creds = scala.io.Source.fromFile("creds.txt").mkString.split("\n")
   val searches = creds(4).split("\\|")
   val banned = creds(5).split("\\|").map(_.toLong)

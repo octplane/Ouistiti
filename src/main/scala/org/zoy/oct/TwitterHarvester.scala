@@ -21,21 +21,32 @@ object TwittProcessor {
 
   case class FollowAndRT(userId: Long, statusId: Long)
   case class SearchFor(query: String)
+  case object StoreFollowers
 
   val following = RemoteServices.mongoConn("ouiouistiti")("following")
   val RTed = RemoteServices.mongoConn("ouiouistiti")("retweeted")
 }
 
 import com.mongodb.casbah.commons.conversions.scala.RegisterJodaTimeConversionHelpers
+
+
 class TwittProcessor extends Actor with LazyLogging {
   RegisterJodaTimeConversionHelpers.register()
   import context.dispatcher
+
+  val READONLY = true
+
+  def ReadOnlyFilter(f: => Unit ) = {
+    if (!READONLY) {
+      f
+    }
+  }
 
   val breaker =
     new CircuitBreaker(context.system.scheduler,
       maxFailures = 2,
       callTimeout = 10.seconds,
-      resetTimeout = 5.minute).onOpen(notifyMeOnOpen())
+      resetTimeout = 50.minute).onOpen(notifyMeOnOpen())
 
   def notifyMeOnOpen(): Unit =
     logger.warn("Twitter has reach Circuit Breaker threshold.")
@@ -44,10 +55,25 @@ class TwittProcessor extends Actor with LazyLogging {
   def getOrLogAndThrow[T](f: => T): T = try {
     f
   } catch {
-    case e: Exception => {
-      logger.error(s"Got exception $e")
+    case e: Throwable => {
+      logger.error(s"Got throwable $e")
       e.printStackTrace
       throw e
+    }
+  }
+
+  def receive = {
+    case TwittProcessor.SearchFor(search: String) => {
+      val harvester = context.actorOf(Props[HarvesterActor], "resultStore")
+      harvester ! breaker.withSyncCircuitBreaker(performSearch(search))
+    }
+    case TwittProcessor.FollowAndRT(userId, statusId) => {
+     val user = TwittProcessor.following.findOne(MongoDBObject("_id" -> userId))
+      user match {
+        case Some(u) => logger.info(s"Already following $userId")
+        case None => breaker.withSyncCircuitBreaker(followUser(userId))
+      }
+      breaker.withCircuitBreaker(Future(retweet(statusId)))
     }
   }
 
@@ -58,39 +84,6 @@ class TwittProcessor extends Actor with LazyLogging {
     val result = getOrLogAndThrow(RemoteServices.twitter.search(query))
 
     HarvesterActor.StoreResult(currentSearch, result)
-  }
-
-  def receive = {
-    case TwittProcessor.SearchFor(search: String) => {
-      val harvester = context.actorOf(Props[HarvesterActor], "resultStore")
-      harvester ! breaker.withSyncCircuitBreaker(performSearch(search))
-    }
-    case TwittProcessor.FollowAndRT(userId, statusId) => {
-      val user = TwittProcessor.following.findOne(MongoDBObject("_id" -> userId))
-      user match {
-        case Some(u) => logger.info(s"Already following $userId")
-        case None => breaker.withSyncCircuitBreaker(followUser(userId))
-      }
-      breaker.withCircuitBreaker(Future(retweet(statusId)))
-    }
-  }
-  def followUser(userId: Long) = {
-    logger.info(s"Following $userId")
-    getOrLogAndThrow(RemoteServices.twitter.friendsFollowers.createFriendship(userId))
-    val obj = MongoDBObject("_id" -> userId, "followDate" -> DateTime.now)
-    TwittProcessor.following += obj
-  }
-  def retweet(statusId: Long) = {
-    if (TwittProcessor.RTed.find(MongoDBObject("_id" -> statusId)).count == 1) {
-      logger.info(s"Already Retweeted $statusId")
-    } else {
-      logger.info(s"RTing $statusId")
-      // 404
-      getOrLogAndThrow(RTStatus(statusId))
-      val obj = MongoDBObject("_id" -> statusId, "rtDate" -> DateTime.now)
-      TwittProcessor.RTed += obj
-
-    }
   }
   def RTStatus(statusId: Long) = {
     try { RemoteServices.twitter.tweets.retweetStatus(statusId) }
@@ -104,7 +97,34 @@ class TwittProcessor extends Actor with LazyLogging {
       case e: Throwable => throw e
     }
   }
+  // RW methods
+  def followUser(userId: Long) = ReadOnlyFilter {
+    if (TwittProcessor.following.count() > 1000) {
+       val extras = TwittProcessor.following.find(MongoDBObject.empty)
+        .sort(orderBy = MongoDBObject("followDate" -> 1))
+        .skip(0).limit(10).toList
+      extras.map{ doc =>
+        getOrLogAndThrow(RemoteServices.twitter.friendsFollowers.destroyFriendship(doc._id.get.toString.toLong))
+      }
+    }
 
+    logger.info(s"Following $userId")
+    getOrLogAndThrow(RemoteServices.twitter.friendsFollowers.createFriendship(userId))
+    val obj = MongoDBObject("_id" -> userId, "followDate" -> DateTime.now)
+    TwittProcessor.following += obj
+  }
+  def retweet(statusId: Long) = ReadOnlyFilter {
+    if (TwittProcessor.RTed.find(MongoDBObject("_id" -> statusId)).count == 1) {
+      logger.info(s"Already Retweeted $statusId")
+    } else {
+      logger.info(s"RTing $statusId")
+      // 404
+      getOrLogAndThrow(RTStatus(statusId))
+      val obj = MongoDBObject("_id" -> statusId, "rtDate" -> DateTime.now)
+      TwittProcessor.RTed += obj
+
+    }
+  }
 }
 
 object HarvesterActor {
@@ -117,6 +137,7 @@ object HarvesterActor {
 class HarvesterActor extends Actor with LazyLogging {
   def receive = {
     case HarvesterActor.Harvest => {
+      val tw = context.actorOf(Props[TwittProcessor])
       harvest
     }
     case HarvesterActor.StoreResult(search, results) => {

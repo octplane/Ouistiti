@@ -31,7 +31,7 @@ class RequeueActor extends Actor with LazyLogging {
               }
               case None => 0
             }
-            if (friends_count > 500) {
+            if (friends_count > 300) {
               try {
                 var tweetId = st.getAs[Number]("source", "id").get.longValue
                 processor ! TwittProcessor.FollowAndRT(userId, tweetId)
@@ -56,14 +56,10 @@ class Manager extends Actor with LazyLogging {
   override def preStart(): Unit = {
     val harvester = context.actorOf(Props[HarvesterActor], "harvester")
     Scheduler.every(harvester ! HarvesterActor.Harvest, 10 * 60 * 1000)
-    // val requeuer = context.actorOf(Props[RequeueActor], "requeuer")
-    // requeuer ! RequeueActor.Requeue
   }
 
   def receive = {
     case msg => logger.info(s"Received message $msg")
-    // when the greeter is done, stop this actor and with it the application
-    // case Greeter.Done => context.stop(self)
   }
 }
 
@@ -86,12 +82,6 @@ object Scheduler {
 
 object Main {
   def main(args: Array[String]): Unit = {
-    import com.cybozu.labs.langdetect.DetectorFactory
-    println("Loading profiles")
-    DetectorFactory.loadProfile("./profiles")
-    println("Loaded profiles")
-
-
     akka.Main.main(Array(classOf[Manager].getName))
   }
 
