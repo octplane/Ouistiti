@@ -17,20 +17,11 @@ object RemoteServices {
   val mongoColl = mongoDB("tweets")
 
   val creds = scala.io.Source.fromFile("creds.txt").mkString.split("\n")
-  val searches = creds(4).split("\\|")
-  val banned = creds(5).split("\\|").map(_.toLong)
+  val searches = creds(0).split("\\|")
+  val banned = creds(1).split("\\|").map(_.toLong)
 
   val twitter = {
-    val cb = new ConfigurationBuilder()
-    val Array(ckey, csecret, at, ats) = creds.slice(0,4)
-    cb.setDebugEnabled(true)
-      .setOAuthConsumerKey(ckey)
-      .setOAuthConsumerSecret(csecret)
-      .setOAuthAccessToken(at)
-      .setOAuthAccessTokenSecret(ats)
-      .setJSONStoreEnabled(true)
-
-    val tf = new TwitterFactory(cb.build())
+    val tf = new TwitterFactory("twitter4j.conf")
     tf.getInstance()
   }
 }

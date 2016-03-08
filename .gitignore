@@ -36,4 +36,5 @@ project/boot/
 /project/target/
 /target/
 creds.txt
+twitter4j.properties
 data

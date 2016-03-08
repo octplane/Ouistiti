@@ -80,10 +80,9 @@ object Scheduler {
   }
 }
 
+// Point d'entrée principal du programme. Appelle Akka avec un Manager
 object Main {
   def main(args: Array[String]): Unit = {
     akka.Main.main(Array(classOf[Manager].getName))
   }
-
 }
-
